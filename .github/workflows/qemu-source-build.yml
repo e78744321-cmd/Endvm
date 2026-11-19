@@ -1,0 +1,62 @@
+
+name: Build QEMU 11.2.0 RC0 Android ARM64
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+
+    steps:
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential ninja-build meson \
+            python3 python3-pip pkg-config \
+            git wget curl cmake flex bison
+
+      - name: Install Android NDK
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r27c
+
+      - name: Download QEMU source
+        run: |
+          wget https://download.qemu.org/qemu-11.2.0-rc0.tar.xz
+          tar -xf qemu-11.2.0-rc0.tar.xz
+
+      - name: Configure QEMU
+        working-directory: qemu-11.2.0-rc0
+        env:
+          NDK: ${{ env.ANDROID_NDK_HOME }}
+        run: |
+          export TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          export CC="$TOOLCHAIN/aarch64-linux-android23-clang"
+          export CXX="$TOOLCHAIN/aarch64-linux-android23-clang++"
+          export AR="$TOOLCHAIN/llvm-ar"
+          export RANLIB="$TOOLCHAIN/llvm-ranlib"
+          ./configure \
+            --target-list=x86_64-softmmu \
+            --cross-prefix=aarch64-linux-android- \
+            --disable-werror \
+            --disable-gtk \
+            --disable-sdl \
+            --disable-opengl \
+            --disable-vnc \
+            --disable-curl \
+            --disable-docs
+
+      - name: Build
+        working-directory: qemu-11.2.0-rc0
+        run: ninja -C build
+
+      - name: Upload build
+        uses: actions/upload-artifact@v4
+        with:
+          name: qemu-11.2.0-rc0-android-arm64
+          path: qemu-11.2.0-rc0/build/qemu-system-x86_64
+          if-no-files-found: error
+          
