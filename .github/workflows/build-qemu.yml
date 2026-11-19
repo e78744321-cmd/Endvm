@@ -29,17 +29,41 @@ jobs:
         run: |
           ./scripts/run-docker.sh ./build-package.sh -I qemu-system-x86-64-headless
 
-      - name: Find packages
+      - name: Show generated packages
         working-directory: termux-packages
         run: |
-          echo "Searching for QEMU packages..."
+          echo "Generated packages:"
           find output -type f -name '*.deb' -print
           test -n "$(find output -type f -name '*.deb' -print -quit)"
+
+      - name: Prepare packages
+        working-directory: termux-packages
+        run: |
+          mkdir -p ../qemu-artifacts
+          find output -type f -name '*.deb' -exec cp -v {} ../qemu-artifacts/ \;
+
+          cd ../qemu-artifacts
+
+          for f in *; do
+            [ -f "$f" ] || continue
+            safe=$(printf '%s' "$f" | sed 's/:/_/g')
+
+            if [ "$safe" != "$f" ]; then
+              mv "$f" "$safe"
+            fi
+          done
+
+          echo "Packages ready for upload:"
+          ls -lh
+
+          test -n "$(find . -type f -name '*.deb' -print -quit)"
 
       - name: Upload QEMU packages
         uses: actions/upload-artifact@v4
         with:
           name: endvm-qemu-android-arm64
-          path: termux-packages/output/*.deb
+          path: qemu-artifacts/*.deb
           if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
           
