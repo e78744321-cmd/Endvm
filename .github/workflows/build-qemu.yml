@@ -1,3 +1,4 @@
+
 name: Build QEMU for Android ARM64
 
 on:
@@ -8,7 +9,7 @@ on:
 
 jobs:
   build-qemu:
-    name: Build Termux QEMU package (aarch64)
+    name: Build QEMU for Android ARM64
     runs-on: ubuntu-latest
     timeout-minutes: 120
 
@@ -23,21 +24,22 @@ jobs:
           ref: master
           path: termux-packages
 
-      - name: Build QEMU for Android ARM64
+      - name: Build QEMU
         working-directory: termux-packages
         run: |
-          ./scripts/run-docker.sh ./build-package.sh -I qemu-common qemu-system-x86-64-headless
+          ./scripts/run-docker.sh ./build-package.sh -I qemu-system-x86-64-headless
 
-      - name: Show generated packages
+      - name: Find packages
         working-directory: termux-packages
         run: |
-          find output -maxdepth 1 -type f -name '*.deb' -print
-          test -n "$(find output -maxdepth 1 -type f -name '*.deb' -print -quit)"
+          echo "Searching for QEMU packages..."
+          find output -type f -name '*.deb' -print
+          test -n "$(find output -type f -name '*.deb' -print -quit)"
 
       - name: Upload QEMU packages
         uses: actions/upload-artifact@v4
         with:
-          name: endvm-qemu-android-arm64-deb
+          name: endvm-qemu-android-arm64
           path: termux-packages/output/*.deb
           if-no-files-found: error
           
