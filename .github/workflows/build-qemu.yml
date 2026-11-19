@@ -1,0 +1,43 @@
+name: Build QEMU for Android ARM64
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/build-qemu.yml"
+
+jobs:
+  build-qemu:
+    name: Build Termux QEMU package (aarch64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout endvm
+        uses: actions/checkout@v4
+
+      - name: Checkout Termux package recipes
+        uses: actions/checkout@v4
+        with:
+          repository: termux/termux-packages
+          ref: master
+          path: termux-packages
+
+      - name: Build QEMU for Android ARM64
+        working-directory: termux-packages
+        run: |
+          ./scripts/run-docker.sh ./build-package.sh -I qemu-common qemu-system-x86-64-headless
+
+      - name: Show generated packages
+        working-directory: termux-packages
+        run: |
+          find output -maxdepth 1 -type f -name '*.deb' -print
+          test -n "$(find output -maxdepth 1 -type f -name '*.deb' -print -quit)"
+
+      - name: Upload QEMU packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: endvm-qemu-android-arm64-deb
+          path: termux-packages/output/*.deb
+          if-no-files-found: error
+          
