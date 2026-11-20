@@ -1,13 +1,23 @@
 
-name: Build QEMU 11.2.0 RC0 Android ARM64
+name: Build QEMU Android ARM64
 
 on:
   workflow_dispatch:
+    inputs:
+      qemu_version:
+        description: QEMU version
+        required: true
+        default: '9.2.2'
 
 jobs:
   build:
     runs-on: ubuntu-22.04
     timeout-minutes: 180
+
+    env:
+      API_LEVEL: 28
+      TARGET_ARCH: aarch64-linux-android
+      PREFIX: ${{ github.workspace }}/android-deps
 
     steps:
       - name: Install build tools
@@ -16,31 +26,46 @@ jobs:
           sudo apt-get install -y \
             build-essential ninja-build meson \
             python3 python3-pip pkg-config \
-            git wget curl cmake flex bison
+            wget curl flex bison automake autoconf \
+            libtool gettext texinfo autopoint
 
-      - name: Install Android NDK
-        uses: nttld/setup-ndk@v1
-        with:
-          ndk-version: r27c
+      - name: Install Android SDK
+        uses: android-actions/setup-android@v3
 
-      - name: Download QEMU source
+      - name: Install NDK
         run: |
-          wget https://download.qemu.org/qemu-11.2.0-rc0.tar.xz
-          tar -xf qemu-11.2.0-rc0.tar.xz
+          sdkmanager "ndk;27.2.12479018"
+
+      - name: Setup Android compiler
+        run: |
+          NDK="$ANDROID_HOME/ndk/27.2.12479018"
+          TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
+
+          echo "NDK=$NDK" >> "$GITHUB_ENV"
+          echo "TOOLCHAIN=$TOOLCHAIN" >> "$GITHUB_ENV"
+          echo "CC=$TOOLCHAIN/aarch64-linux-android28-clang" >> "$GITHUB_ENV"
+          echo "CXX=$TOOLCHAIN/aarch64-linux-android28-clang++" >> "$GITHUB_ENV"
+          echo "AR=$TOOLCHAIN/llvm-ar" >> "$GITHUB_ENV"
+          echo "RANLIB=$TOOLCHAIN/llvm-ranlib" >> "$GITHUB_ENV"
+          echo "STRIP=$TOOLCHAIN/llvm-strip" >> "$GITHUB_ENV"
+
+          test -x "$TOOLCHAIN/aarch64-linux-android28-clang"
+
+      - name: Download QEMU
+        run: |
+          VERSION="${{ github.event.inputs.qemu_version }}"
+          wget "https://download.qemu.org/qemu-${VERSION}.tar.xz"
+          tar -xf "qemu-${VERSION}.tar.xz"
+          mv "qemu-${VERSION}" qemu-src
 
       - name: Configure QEMU
-        working-directory: qemu-11.2.0-rc0
-        env:
-          NDK: ${{ env.ANDROID_NDK_HOME }}
+        working-directory: qemu-src
         run: |
-          export TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
-          export CC="$TOOLCHAIN/aarch64-linux-android23-clang"
-          export CXX="$TOOLCHAIN/aarch64-linux-android23-clang++"
-          export AR="$TOOLCHAIN/llvm-ar"
-          export RANLIB="$TOOLCHAIN/llvm-ranlib"
           ./configure \
+            --cc="$CC" \
+            --cxx="$CXX" \
+            --host-cc=gcc \
             --target-list=x86_64-softmmu \
-            --cross-prefix=aarch64-linux-android- \
             --disable-werror \
             --disable-gtk \
             --disable-sdl \
@@ -49,14 +74,21 @@ jobs:
             --disable-curl \
             --disable-docs
 
-      - name: Build
-        working-directory: qemu-11.2.0-rc0
-        run: ninja -C build
+      - name: Build QEMU
+        working-directory: qemu-src
+        run: |
+          ninja -C build
 
-      - name: Upload build
+      - name: Check binary
+        run: |
+          "$STRIP" qemu-src/build/qemu-system-x86_64
+          file qemu-src/build/qemu-system-x86_64
+          readelf -h qemu-src/build/qemu-system-x86_64
+
+      - name: Upload QEMU
         uses: actions/upload-artifact@v4
         with:
-          name: qemu-11.2.0-rc0-android-arm64
-          path: qemu-11.2.0-rc0/build/qemu-system-x86_64
+          name: qemu-${{ github.event.inputs.qemu_version }}-android-arm64
+          path: qemu-src/build/qemu-system-x86_64
           if-no-files-found: error
           
