@@ -17,8 +17,13 @@ jobs:
     env:
       API_LEVEL: 28
       PREFIX: ${{ github.workspace }}/android-deps
+      ANDROID_HOME: /usr/local/lib/android/sdk
+      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
 
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
       - name: Install build tools
         run: |
           sudo apt-get update
@@ -35,12 +40,17 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Install Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install NDK
+      - name: Setup Android SDK
         run: |
-          sdkmanager "ndk;27.2.12479018"
+          mkdir -p "$ANDROID_HOME/cmdline-tools"
+          echo "$ANDROID_HOME/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
+
+          yes | sdkmanager --sdk_root="$ANDROID_HOME" --licenses || true
+
+      - name: Install Android NDK
+        run: |
+          sdkmanager --sdk_root="$ANDROID_HOME" \
+            --install "ndk;27.2.12479018"
 
       - name: Setup Android compiler
         run: |
@@ -87,7 +97,7 @@ jobs:
         run: |
           ninja -C build -j2
 
-      - name: Check binary
+      - name: Verify QEMU binary
         run: |
           test -f qemu-src/build/qemu-system-x86_64
           "$STRIP" qemu-src/build/qemu-system-x86_64
