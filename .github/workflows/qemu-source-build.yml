@@ -16,7 +16,6 @@ jobs:
 
     env:
       API_LEVEL: 28
-      PREFIX: ${{ github.workspace }}/android-deps
       ANDROID_HOME: /usr/local/lib/android/sdk
       ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
 
@@ -32,7 +31,8 @@ jobs:
             python3 python3-pip pkg-config \
             wget curl flex bison automake autoconf \
             libtool gettext texinfo autopoint \
-            gcc g++ file
+            gcc g++ file zlib1g-dev libglib2.0-dev \
+            libpixman-1-dev
 
       - name: Setup Java 17
         uses: actions/setup-java@v4
@@ -41,11 +41,9 @@ jobs:
           java-version: '17'
 
       - name: Setup Android SDK
-        run: |
-          mkdir -p "$ANDROID_HOME/cmdline-tools"
-          echo "$ANDROID_HOME/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
-
-          yes | sdkmanager --sdk_root="$ANDROID_HOME" --licenses || true
+        uses: android-actions/setup-android@v3
+        with:
+          packages: ''
 
       - name: Install Android NDK
         run: |
@@ -57,7 +55,6 @@ jobs:
           NDK="$ANDROID_HOME/ndk/27.2.12479018"
           TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
 
-          echo "NDK=$NDK" >> "$GITHUB_ENV"
           echo "TOOLCHAIN=$TOOLCHAIN" >> "$GITHUB_ENV"
           echo "CC=$TOOLCHAIN/aarch64-linux-android28-clang" >> "$GITHUB_ENV"
           echo "CXX=$TOOLCHAIN/aarch64-linux-android28-clang++" >> "$GITHUB_ENV"
@@ -78,8 +75,8 @@ jobs:
         working-directory: qemu-src
         run: |
           ./configure \
-            --cc="$CC" \
-            --cxx="$CXX" \
+            --cross-cc="$CC" \
+            --cross-cxx="$CXX" \
             --host-cc=gcc \
             --target-list=x86_64-softmmu \
             --disable-werror \
@@ -89,6 +86,7 @@ jobs:
             --disable-vnc \
             --disable-curl \
             --disable-docs \
+            --disable-hexagon \
             --disable-capstone \
             --disable-fdt
 
