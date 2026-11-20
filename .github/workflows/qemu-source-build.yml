@@ -1,23 +1,32 @@
-
-name: Build QEMU Android ARM64
+name: Build Standalone QEMU Android ARM64
 
 on:
   workflow_dispatch:
     inputs:
       qemu_version:
-        description: 'QEMU version'
+        description: "QEMU version"
         required: true
-        default: '9.2.2'
+        default: "9.2.2"
 
 jobs:
   build:
+    name: Build QEMU for Android ARM64
     runs-on: ubuntu-22.04
-    timeout-minutes: 180
+    timeout-minutes: 360
+
+    defaults:
+      run:
+        # bash с pipefail: ошибка в `ninja | tee` больше не маскируется
+        shell: bash
 
     env:
       ANDROID_HOME: /usr/local/lib/android/sdk
       ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
-      API_LEVEL: 28
+      ANDROID_API: "28"
+      NDK_VERSION: "27.2.12479018"
+      PREFIX: ${{ github.workspace }}/android-prefix
+      STAGE: ${{ github.workspace }}/stage
+      QEMU_VERSION: ${{ inputs.qemu_version }}
 
     steps:
       - name: Checkout repository
@@ -27,81 +36,461 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            build-essential gcc g++ \
-            ninja-build meson python3 python3-pip \
-            pkg-config wget curl flex bison \
-            automake autoconf libtool \
-            gettext texinfo autopoint \
-            file zlib1g-dev libglib2.0-dev \
-            libpixman-1-dev
+            build-essential gcc g++ make \
+            ninja-build pkg-config \
+            python3 python3-pip python3-venv \
+            wget curl xz-utils tar bzip2 \
+            autoconf automake libtool \
+            gettext autopoint flex bison \
+            file binutils \
+            libglib2.0-dev-bin
+
+          python3 -m pip install --user "meson==1.5.0"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Setup Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: "17"
 
       - name: Install Android NDK
         run: |
+          set -eux
           export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$PATH"
-          yes | sdkmanager --licenses
-          sdkmanager --install "ndk;27.2.12479018"
 
-      - name: Setup Android compiler
+          if [ ! -d "$ANDROID_HOME/ndk/$NDK_VERSION" ]; then
+            # `yes` получает SIGPIPE, поэтому || true
+            yes | sdkmanager --sdk_root="$ANDROID_HOME" --licenses > /dev/null || true
+            sdkmanager --sdk_root="$ANDROID_HOME" --install "ndk;$NDK_VERSION"
+          fi
+
+          test -d "$ANDROID_HOME/ndk/$NDK_VERSION"
+
+      - name: Configure Android ARM64 compiler
         run: |
-          NDK="$ANDROID_HOME/ndk/27.2.12479018"
+          set -eux
+
+          NDK="$ANDROID_HOME/ndk/$NDK_VERSION"
           TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          CLANG="$TOOLCHAIN/aarch64-linux-android${ANDROID_API}-clang"
 
-          echo "TOOLCHAIN=$TOOLCHAIN" >> "$GITHUB_ENV"
-          echo "CC=$TOOLCHAIN/aarch64-linux-android28-clang" >> "$GITHUB_ENV"
-          echo "CXX=$TOOLCHAIN/aarch64-linux-android28-clang++" >> "$GITHUB_ENV"
-          echo "AR=$TOOLCHAIN/llvm-ar" >> "$GITHUB_ENV"
-          echo "RANLIB=$TOOLCHAIN/llvm-ranlib" >> "$GITHUB_ENV"
-          echo "STRIP=$TOOLCHAIN/llvm-strip" >> "$GITHUB_ENV"
+          test -x "$CLANG"
+          "$CLANG" --version
 
-          test -x "$TOOLCHAIN/aarch64-linux-android28-clang"
+          # Тулчейн НЕ добавляем в PATH: иначе NDK-clang подменит хостовый
+          # компилятор. Везде используются абсолютные пути.
+          {
+            echo "NDK=$NDK"
+            echo "TOOLCHAIN=$TOOLCHAIN"
+            echo "CC=$CLANG"
+            echo "CXX=${CLANG}++"
+            echo "AR=$TOOLCHAIN/llvm-ar"
+            echo "RANLIB=$TOOLCHAIN/llvm-ranlib"
+            echo "STRIP=$TOOLCHAIN/llvm-strip"
+          } >> "$GITHUB_ENV"
+
+      - name: Prepare helpers, pkg-config and Meson cross file
+        run: |
+          set -eux
+
+          mkdir -p "$PREFIX/bin" "$PREFIX/lib/pkgconfig" src build out
+
+          # Скачивание с запасными URL + распаковка в DEST без верхней папки
+          cat > "$RUNNER_TEMP/fetch-extract.sh" <<'EOF'
+          #!/bin/sh
+          # usage: fetch-extract.sh DEST URL [URL...]
+          set -eu
+          dest="$1"; shift
+          mkdir -p "$dest"
+          tmp="$(mktemp)"
+          for url in "$@"; do
+            echo "Trying $url"
+            if wget -nv --tries=3 --timeout=60 -O "$tmp" "$url" && tar -tf "$tmp" > /dev/null 2>&1; then
+              tar -xf "$tmp" -C "$dest" --strip-components=1
+              rm -f "$tmp"
+              echo "OK: $url"
+              exit 0
+            fi
+          done
+          echo "All download URLs failed for $dest" >&2
+          exit 1
+          EOF
+          chmod +x "$RUNNER_TEMP/fetch-extract.sh"
+
+          # pkg-config, который видит только Android-префикс
+          cat > "$PREFIX/bin/pkg-config" <<EOF
+          #!/bin/sh
+          export PKG_CONFIG_PATH=
+          export PKG_CONFIG_LIBDIR="$PREFIX/lib/pkgconfig"
+          exec /usr/bin/pkg-config --static "\$@"
+          EOF
+          chmod +x "$PREFIX/bin/pkg-config"
+
+          # Общий cross-файл Meson (pixman, glib, libslirp)
+          CROSS_FILE="$GITHUB_WORKSPACE/android-cross.ini"
+          cat > "$CROSS_FILE" <<EOF
+          [binaries]
+          c = '$CC'
+          cpp = '$CXX'
+          ar = '$AR'
+          ranlib = '$RANLIB'
+          strip = '$STRIP'
+          pkg-config = '$PREFIX/bin/pkg-config'
+
+          [host_machine]
+          system = 'android'
+          cpu_family = 'aarch64'
+          cpu = 'aarch64'
+          endian = 'little'
+
+          [properties]
+          needs_exe_wrapper = true
+          pkg_config_libdir = ['$PREFIX/lib/pkgconfig']
+          have_c99_vsnprintf = true
+          have_c99_snprintf = true
+          have_unix98_printf = true
+          va_val_copy = true
+
+          [built-in options]
+          c_args = ['-DANDROID', '-fPIC', '-O2', '-I$PREFIX/include']
+          c_link_args = ['-L$PREFIX/lib', '-Wl,-z,max-page-size=16384']
+          EOF
+
+          {
+            echo "FETCH=$RUNNER_TEMP/fetch-extract.sh"
+            echo "PKG_CONFIG=$PREFIX/bin/pkg-config"
+            echo "CROSS_FILE=$CROSS_FILE"
+          } >> "$GITHUB_ENV"
+
+      - name: Build libffi for Android
+        run: |
+          set -eux
+
+          "$FETCH" src/libffi \
+            https://github.com/libffi/libffi/releases/download/v3.4.6/libffi-3.4.6.tar.gz
+
+          cd src/libffi
+
+          CC="$CC" \
+          AR="$AR" \
+          RANLIB="$RANLIB" \
+          STRIP="$STRIP" \
+          CFLAGS="-O2 -fPIC" \
+          ./configure \
+            --host=aarch64-linux-android \
+            --prefix="$PREFIX" \
+            --libdir="$PREFIX/lib" \
+            --disable-shared \
+            --enable-static \
+            --disable-docs
+
+          make -j"$(nproc)"
+          make install
+
+      - name: Build PCRE2 for Android
+        run: |
+          set -eux
+
+          "$FETCH" src/pcre2 \
+            https://github.com/PCRE2Project/pcre2/releases/download/pcre2-10.44/pcre2-10.44.tar.gz
+
+          cd src/pcre2
+
+          CC="$CC" \
+          AR="$AR" \
+          RANLIB="$RANLIB" \
+          STRIP="$STRIP" \
+          CFLAGS="-O2 -fPIC" \
+          ./configure \
+            --host=aarch64-linux-android \
+            --prefix="$PREFIX" \
+            --libdir="$PREFIX/lib" \
+            --disable-shared \
+            --enable-static \
+            --enable-pcre2-8 \
+            --disable-pcre2-16 \
+            --disable-pcre2-32 \
+            --disable-jit
+
+          make -j"$(nproc)"
+          make install
+
+      - name: Build zlib for Android
+        run: |
+          set -eux
+
+          "$FETCH" src/zlib \
+            https://github.com/madler/zlib/releases/download/v1.3.1/zlib-1.3.1.tar.gz \
+            https://zlib.net/fossils/zlib-1.3.1.tar.gz
+
+          cd src/zlib
+
+          CHOST=aarch64-linux-android \
+          CC="$CC" \
+          AR="$AR" \
+          RANLIB="$RANLIB" \
+          CFLAGS="-O2 -fPIC" \
+          ./configure \
+            --prefix="$PREFIX" \
+            --static
+
+          make -j"$(nproc)"
+          make install
+
+      # В Pixman 0.44.x автотулз удалён (нет ./configure) — собираем через Meson.
+      - name: Build Pixman for Android
+        run: |
+          set -eux
+
+          "$FETCH" src/pixman \
+            https://www.cairographics.org/releases/pixman-0.44.2.tar.xz \
+            https://xorg.freedesktop.org/releases/individual/lib/pixman-0.44.2.tar.xz \
+            https://www.cairographics.org/releases/pixman-0.44.2.tar.gz \
+            https://gitlab.freedesktop.org/pixman/pixman/-/archive/pixman-0.44.2/pixman-pixman-0.44.2.tar.gz
+
+          cd src/pixman
+
+          BUILD="$GITHUB_WORKSPACE/build/pixman"
+          COMMON=(
+            --cross-file "$CROSS_FILE"
+            --prefix="$PREFIX"
+            --libdir=lib
+            --buildtype=release
+            -Ddefault_library=static
+          )
+
+          # tests/demos — feature-опции (disabled); если в этой версии они boolean — пробуем false
+          if ! meson setup "$BUILD" . "${COMMON[@]}" -Dtests=disabled -Ddemos=disabled; then
+            rm -rf "$BUILD"
+            meson setup "$BUILD" . "${COMMON[@]}" -Dtests=false -Ddemos=false
+          fi
+
+          ninja -C "$BUILD" -j"$(nproc)"
+          meson install -C "$BUILD"
+
+      - name: Check Android dependencies
+        run: |
+          set -eux
+
+          for p in libffi libpcre2-8 zlib pixman-1; do
+            echo -n "$p: "
+            "$PKG_CONFIG" --modversion "$p"
+          done
+
+          ls -lh "$PREFIX/lib"
+
+      - name: Build GLib for Android ARM64
+        run: |
+          set -eux
+
+          "$FETCH" src/glib \
+            https://download.gnome.org/sources/glib/2.76/glib-2.76.6.tar.xz \
+            https://ftp.gnome.org/pub/GNOME/sources/glib/2.76/glib-2.76.6.tar.xz
+
+          cd src/glib
+
+          # Передаём только те опции, которые реально есть в этой версии GLib
+          if [ -f meson.options ]; then OPT_FILE=meson.options; else OPT_FILE=meson_options.txt; fi
+
+          GLIB_OPTS=""
+          for kv in \
+            tests=false installed_tests=false \
+            libmount=disabled selinux=disabled libelf=disabled sysprof=disabled \
+            nls=disabled man=false dtrace=false systemtap=false gtk_doc=false \
+            xattr=false force_posix_threads=true
+          do
+            k="${kv%%=*}"
+            if grep -q "option('$k'" "$OPT_FILE"; then
+              GLIB_OPTS="$GLIB_OPTS -D$kv"
+            else
+              echo "note: GLib has no option '$k', skipping"
+            fi
+          done
+
+          BUILD="$GITHUB_WORKSPACE/build/glib"
+
+          meson setup "$BUILD" . \
+            --cross-file "$CROSS_FILE" \
+            --prefix="$PREFIX" \
+            --libdir=lib \
+            --buildtype=release \
+            -Ddefault_library=static \
+            $GLIB_OPTS
+
+          ninja -C "$BUILD" -j"$(nproc)"
+          meson install -C "$BUILD"
+
+      - name: Verify GLib
+        run: |
+          set -eux
+
+          "$PKG_CONFIG" --modversion glib-2.0
+          "$PKG_CONFIG" --modversion gthread-2.0
+          "$PKG_CONFIG" --cflags --libs glib-2.0
+
+      # Нужен для сети `-netdev user` (без root). Необязательный шаг:
+      # если не соберётся — QEMU соберётся без slirp.
+      - name: Build libslirp for Android (optional)
+        continue-on-error: true
+        run: |
+          set -eux
+
+          "$FETCH" src/libslirp \
+            https://gitlab.freedesktop.org/slirp/libslirp/-/archive/v4.8.0/libslirp-v4.8.0.tar.gz
+
+          BUILD="$GITHUB_WORKSPACE/build/libslirp"
+
+          meson setup "$BUILD" src/libslirp \
+            --cross-file "$CROSS_FILE" \
+            --prefix="$PREFIX" \
+            --libdir=lib \
+            --buildtype=release \
+            -Ddefault_library=static
+
+          ninja -C "$BUILD" -j"$(nproc)"
+          meson install -C "$BUILD"
 
       - name: Download QEMU
         run: |
-          VERSION="${{ github.event.inputs.qemu_version }}"
-          wget "https://download.qemu.org/qemu-${VERSION}.tar.xz"
-          tar -xf "qemu-${VERSION}.tar.xz"
-          mv "qemu-${VERSION}" qemu-src
+          set -eux
 
-      - name: Configure QEMU
-        working-directory: qemu-src
+          case "$QEMU_VERSION" in
+            *[!0-9.]*|"")
+              echo "Invalid QEMU version"
+              exit 1
+              ;;
+          esac
+
+          "$FETCH" src/qemu "https://download.qemu.org/qemu-${QEMU_VERSION}.tar.xz"
+
+      - name: Configure QEMU for Android ARM64
+        working-directory: src/qemu
         run: |
-          ./configure \
+          set -eux
+
+          SLIRP_FLAG="--disable-slirp"
+          if "$PKG_CONFIG" --exists slirp; then
+            SLIRP_FLAG="--enable-slirp"
+          fi
+          echo "slirp flag: $SLIRP_FLAG"
+
+          export PKG_CONFIG="$PREFIX/bin/pkg-config"
+          export PKG_CONFIG_LIBDIR="$PREFIX/lib/pkgconfig"
+          export NM="$TOOLCHAIN/llvm-nm"
+          export OBJCOPY="$TOOLCHAIN/llvm-objcopy"
+          export LD="$TOOLCHAIN/ld.lld"
+
+          mkdir -p build
+          cd build
+
+          # --prefix=/qemu: QEMU relocatable, bin/ и share/qemu/ лежат рядом
+          ../configure \
+            --prefix=/qemu \
             --cross-prefix="$TOOLCHAIN/llvm-" \
             --cc="$CC" \
             --cxx="$CXX" \
             --host-cc=gcc \
+            --extra-cflags="-O2 -I$PREFIX/include" \
+            --extra-ldflags="-L$PREFIX/lib -Wl,-z,max-page-size=16384" \
             --target-list=x86_64-softmmu \
             --disable-werror \
+            --disable-docs \
+            --disable-guest-agent \
+            --disable-kvm \
+            --disable-containers \
             --disable-gtk \
             --disable-sdl \
             --disable-opengl \
-            --disable-vnc \
             --disable-curl \
-            --disable-docs
+            --disable-curses \
+            --disable-gio \
+            --disable-virtfs \
+            --disable-capstone \
+            --enable-vnc \
+            "$SLIRP_FLAG"
 
       - name: Build QEMU
-        working-directory: qemu-src
         run: |
-          ninja -C build -j2
+          set -eux
+          ninja -C src/qemu/build -j"$(nproc)" 2>&1 | tee build-qemu.log
 
-      - name: Verify QEMU binary
+      - name: Install QEMU into staging directory
         run: |
-          test -f qemu-src/build/qemu-system-x86_64
-          file qemu-src/build/qemu-system-x86_64
-          readelf -h qemu-src/build/qemu-system-x86_64
-          "$STRIP" qemu-src/build/qemu-system-x86_64
+          set -eux
+          DESTDIR="$STAGE" ninja -C src/qemu/build install
+          ls -R "$STAGE/qemu" | head -n 80
 
-      - name: Upload QEMU
+      - name: Verify and package ARM64 build
+        run: |
+          set -eux
+
+          ROOT="$STAGE/qemu"
+          BIN="$ROOT/bin/qemu-system-x86_64"
+
+          test -f "$BIN"
+          test -d "$ROOT/share/qemu"
+
+          for f in "$ROOT"/bin/*; do
+            "$STRIP" --strip-unneeded "$f" || true
+          done
+
+          file "$BIN"
+
+          readelf -h "$BIN" > out/qemu-elf-header.txt
+          cat out/qemu-elf-header.txt
+          grep -q "AArch64" out/qemu-elf-header.txt
+
+          # Бинарник должен быть собран под bionic, а не под glibc
+          readelf -lW "$BIN" > out/qemu-program-headers.txt
+          grep -q "/system/bin/linker64" out/qemu-program-headers.txt
+          grep "LOAD" out/qemu-program-headers.txt
+
+          readelf -d "$BIN" > out/qemu-dynamic-libraries.txt
+          cat out/qemu-dynamic-libraries.txt
+
+          BAD="$(sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p' out/qemu-dynamic-libraries.txt \
+            | grep -Ev '^(libc|libm|libdl|liblog|libz|libandroid)\.so$' || true)"
+          if [ -n "$BAD" ]; then
+            echo "::warning::Binary needs non-system libraries: $BAD"
+          fi
+
+          {
+            echo "QEMU version: $QEMU_VERSION"
+            echo "Host architecture: Android ARM64 (API $ANDROID_API, NDK $NDK_VERSION)"
+            echo "Guest architecture: x86_64 (TCG)"
+            echo "Data files: share/qemu (bundled in the tarball, found relative to bin/)"
+            echo
+            file "$BIN"
+          } > out/qemu-build-info.txt
+
+          tar -C "$STAGE" -czf out/qemu-android-arm64.tar.gz qemu
+          cp "$BIN" out/qemu-system-x86_64
+
+          ls -lh out
+
+      - name: Upload standalone QEMU
         uses: actions/upload-artifact@v4
         with:
-          name: qemu-${{ github.event.inputs.qemu_version }}-android-arm64
-          path: qemu-src/build/qemu-system-x86_64
+          name: qemu-${{ inputs.qemu_version }}-standalone-android-arm64
+          path: out/
           if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+      - name: Upload build logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs-${{ github.run_id }}
+          path: |
+            build-qemu.log
+            src/qemu/build/config.log
+            src/qemu/build/meson-logs/*
+            build/*/meson-logs/*
+            src/libffi/config.log
+            src/pcre2/config.log
+            src/zlib/configure.log
+          if-no-files-found: ignore
           retention-days: 7
           
