@@ -15,9 +15,9 @@ jobs:
     timeout-minutes: 180
 
     env:
-      API_LEVEL: 28
       ANDROID_HOME: /usr/local/lib/android/sdk
       ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+      API_LEVEL: 28
 
     steps:
       - name: Checkout repository
@@ -27,11 +27,12 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            build-essential ninja-build meson \
-            python3 python3-pip pkg-config \
-            wget curl flex bison automake autoconf \
-            libtool gettext texinfo autopoint \
-            gcc g++ file zlib1g-dev libglib2.0-dev \
+            build-essential gcc g++ \
+            ninja-build meson python3 python3-pip \
+            pkg-config wget curl flex bison \
+            automake autoconf libtool \
+            gettext texinfo autopoint \
+            file zlib1g-dev libglib2.0-dev \
             libpixman-1-dev
 
       - name: Setup Java 17
@@ -40,15 +41,11 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-        with:
-          packages: ''
-
       - name: Install Android NDK
         run: |
-          sdkmanager --sdk_root="$ANDROID_HOME" \
-            --install "ndk;27.2.12479018"
+          export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$PATH"
+          yes | sdkmanager --licenses
+          sdkmanager --install "ndk;27.2.12479018"
 
       - name: Setup Android compiler
         run: |
@@ -75,8 +72,9 @@ jobs:
         working-directory: qemu-src
         run: |
           ./configure \
-            --cross-cc="$CC" \
-            --cross-cxx="$CXX" \
+            --cross-prefix="$TOOLCHAIN/llvm-" \
+            --cc="$CC" \
+            --cxx="$CXX" \
             --host-cc=gcc \
             --target-list=x86_64-softmmu \
             --disable-werror \
@@ -85,10 +83,7 @@ jobs:
             --disable-opengl \
             --disable-vnc \
             --disable-curl \
-            --disable-docs \
-            --disable-hexagon \
-            --disable-capstone \
-            --disable-fdt
+            --disable-docs
 
       - name: Build QEMU
         working-directory: qemu-src
@@ -98,9 +93,9 @@ jobs:
       - name: Verify QEMU binary
         run: |
           test -f qemu-src/build/qemu-system-x86_64
-          "$STRIP" qemu-src/build/qemu-system-x86_64
           file qemu-src/build/qemu-system-x86_64
           readelf -h qemu-src/build/qemu-system-x86_64
+          "$STRIP" qemu-src/build/qemu-system-x86_64
 
       - name: Upload QEMU
         uses: actions/upload-artifact@v4
@@ -108,4 +103,5 @@ jobs:
           name: qemu-${{ github.event.inputs.qemu_version }}-android-arm64
           path: qemu-src/build/qemu-system-x86_64
           if-no-files-found: error
+          retention-days: 7
           
