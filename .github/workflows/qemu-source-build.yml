@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
     inputs:
       qemu_version:
-        description: QEMU version
+        description: 'QEMU version'
         required: true
         default: '9.2.2'
 
@@ -16,7 +16,6 @@ jobs:
 
     env:
       API_LEVEL: 28
-      TARGET_ARCH: aarch64-linux-android
       PREFIX: ${{ github.workspace }}/android-deps
 
     steps:
@@ -27,7 +26,14 @@ jobs:
             build-essential ninja-build meson \
             python3 python3-pip pkg-config \
             wget curl flex bison automake autoconf \
-            libtool gettext texinfo autopoint
+            libtool gettext texinfo autopoint \
+            gcc g++ file
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
 
       - name: Install Android SDK
         uses: android-actions/setup-android@v3
@@ -72,15 +78,18 @@ jobs:
             --disable-opengl \
             --disable-vnc \
             --disable-curl \
-            --disable-docs
+            --disable-docs \
+            --disable-capstone \
+            --disable-fdt
 
       - name: Build QEMU
         working-directory: qemu-src
         run: |
-          ninja -C build
+          ninja -C build -j2
 
       - name: Check binary
         run: |
+          test -f qemu-src/build/qemu-system-x86_64
           "$STRIP" qemu-src/build/qemu-system-x86_64
           file qemu-src/build/qemu-system-x86_64
           readelf -h qemu-src/build/qemu-system-x86_64
